@@ -10,8 +10,7 @@ use iggy::utils::topic_size::MaxTopicSize;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
-const DEFAULT_ROOT_USERNAME: &str = "iggy";
-const DEFAULT_ROOT_PASSWORD: &str = "iggy";
+use std::env;
 
 
 /// Message structure for SMS events in Iggy
@@ -40,10 +39,13 @@ impl MessageBroker {
         
         client.connect().await?;
         
-        // Authenticate with default root user
-        client.login_user(DEFAULT_ROOT_USERNAME, DEFAULT_ROOT_PASSWORD).await
+
+        // Authenticate with credentials from environment variables
+        let username = env::var("IGGY_USERNAME").unwrap_or_else(|_| "root".to_string());
+        let password = env::var("IGGY_PASSWORD").unwrap_or_else(|_| "".to_string());
+        client.login_user(&username, &password).await
             .context("Failed to authenticate with Iggy")?;
-        info!("Connected and authenticated to Iggy");
+        info!("Connected and authenticated to Iggy as {}", username);
 
         let stream_id = 1;
         let topic_id = 1;
@@ -65,19 +67,32 @@ impl MessageBroker {
     async fn initialize_stream(&self) -> Result<()> {
         let stream_name = "sms_stream";
         let stream_id = Identifier::numeric(self.stream_id)?;
-        
-        // Delete existing stream first to ensure clean state
-        match self.client.delete_stream(&stream_id).await {
-            Ok(_) => {}
-            Err(_) => {} // Stream doesn't exist yet, that's fine
+
+        // Check if stream exists by trying to get it
+        match self.client.get_stream(&stream_id).await {
+            Ok(_) => {
+                info!("Stream already exists: {}", stream_name);
+                return Ok(());
+            }
+            Err(_) => {
+                // Stream does not exist, try to create
+                match self.client.create_stream(stream_name, Some(self.stream_id)).await {
+                    Ok(_) => {
+                        info!("✓ Stream ready: {}", stream_name);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // If stream already exists (race), treat as success
+                        if e.to_string().contains("already exists") {
+                            info!("Stream already exists (race): {}", stream_name);
+                            Ok(())
+                        } else {
+                            Err(e).context("Failed to create stream")
+                        }
+                    }
+                }
+            }
         }
-        
-        // Create fresh stream
-        self.client
-            .create_stream(stream_name, Some(self.stream_id))
-            .await?;
-        info!("âœ“ Stream ready: {}", stream_name);
-        Ok(())
     }
 
     /// Initialize the SMS topic if it doesn't exist

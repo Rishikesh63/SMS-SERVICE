@@ -250,10 +250,10 @@ async fn main() -> Result<()> {
     let broker = Arc::new(MessageBroker::new(&iggy_address).await?);
     info!("✓ Iggy connected ({})", iggy_address);
 
-    // Start consumers for parallel processing
-    // Consumer 1: Store messages in Turso
+
+    // Start consumers for parallel processing, each with its own IggyClient
     let turso_consumer = Arc::new(TursoConsumer::new(
-        broker.client(),
+        iggy::clients::client::IggyClient::default(),
         broker.stream_id(),
         broker.topic_id(),
         store.clone(),
@@ -267,9 +267,8 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Consumer 2: AI processing and response generation
     let ai_consumer = Arc::new(AIConsumer::new(
-        broker.client(),
+        iggy::clients::client::IggyClient::default(),
         broker.stream_id(),
         broker.topic_id(),
         store.clone(),

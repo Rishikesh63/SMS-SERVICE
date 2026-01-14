@@ -6,3 +6,4 @@ Cargo.lock
 *.db-wal
 .qodo
 .vscode/
+.Cargo

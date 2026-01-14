@@ -80,17 +80,56 @@ For Linux/macOS:
 
 For Windows:
 ```bat
-start-sms-server.bat
+.\start-sms-server.bat
 ```
 
 These scripts check for required environment files and Rust installation, then build and start the SMS server automatically.
 
 ---
 ## 3. Start Iggy Broker
-```bash
-docker pull apache/iggy:latest
-docker run --rm -p 8090:8090 apache/iggy:latest
+
+### For Windows (PowerShell):
+
+Use the following command to run Iggy broker with all recommended flags and persistent storage:
+
+```powershell
+docker run --rm `
+	--cap-add=SYS_NICE `
+	--security-opt seccomp=unconfined `
+	--ulimit memlock=-1:-1 `
+	-e IGGY_USERNAME=root `
+	-e IGGY_PASSWORD=iggy `
+	-e IGGY_HTTP_ENABLED=true `
+	-e IGGY_HTTP_ADDRESS=0.0.0.0:8080 `
+	-e IGGY_TCP_ENABLED=true `
+	-e IGGY_TCP_ADDRESS=0.0.0.0:8090 `
+	-v "C:\Users\User\Desktop\Conversation-Store\iggy_data:/iggy/local_data" `
+	-p 8080:8080 `
+	-p 8090:8090 `
+	apache/iggy:latest
 ```
+
+This command uses the recommended Docker flags and mounts a persistent data directory. Adjust the path if your workspace is in a different location.
+
+### For Linux/macOS:
+```bash
+docker run --rm \
+	--cap-add=SYS_NICE \
+	--security-opt seccomp=unconfined \
+	--ulimit memlock=-1:-1 \
+	-e IGGY_ROOT_USERNAME=root \
+	-e IGGY_ROOT_PASSWORD=iggy \
+	-e IGGY_HTTP_ENABLED=true \
+	-e IGGY_HTTP_ADDRESS=0.0.0.0:8080 \
+	-e IGGY_TCP_ENABLED=true \
+	-e IGGY_TCP_ADDRESS=0.0.0.0:8090 \
+	-v "$PWD/iggy_data:/iggy/local_data" \
+	-p 8080:8080 \
+	-p 8090:8090 \
+	apache/iggy:latest
+```
+
+You can also use `docker pull apache/iggy:latest` to update the image before running.
 ---
 
 ## 4. Build Project

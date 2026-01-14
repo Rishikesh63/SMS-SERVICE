@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use iggy::client::MessageClient;
+use iggy::client::{MessageClient, UserClient, Client};
 use iggy::clients::client::IggyClient;
 use iggy::consumer::Consumer;
 use iggy::identifier::Identifier;
@@ -17,7 +17,7 @@ use conversation_store::{ConversationStore, MessageRole};
 
 /// Consumer for storing SMS messages in Turso
 pub struct TursoConsumer {
-    client: Arc<IggyClient>,
+    client: IggyClient,
     stream_id: u32,
     topic_id: u32,
     consumer_group_id: u32,  // Shared group ID
@@ -27,7 +27,7 @@ pub struct TursoConsumer {
 
 impl TursoConsumer {
     pub fn new(
-        client: Arc<IggyClient>,
+        client: IggyClient,
         stream_id: u32,
         topic_id: u32,
         store: Arc<ConversationStore>,
@@ -44,7 +44,19 @@ impl TursoConsumer {
 
     pub async fn start(self: Arc<Self>) -> Result<()> {
         info!("→ Turso consumer ready (group=100)");
-        
+
+        // Explicitly connect and log in this consumer
+        let iggy_address = std::env::var("IGGY_SERVER_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8090".to_string());
+        self.client.connect().await?;
+        let username = std::env::var("IGGY_USERNAME")
+            .or_else(|_| std::env::var("IGGY_ROOT_USERNAME"))
+            .unwrap_or_else(|_| "root".to_string());
+        let password = std::env::var("IGGY_PASSWORD")
+            .or_else(|_| std::env::var("IGGY_ROOT_PASSWORD"))
+            .unwrap_or_else(|_| "".to_string());
+        tracing::info!("Consumer authenticating with username='{}' password='{}'", username, password);
+        self.client.login_user(&username, &password).await?;
+
         loop {
             match self.poll_and_process().await {
                 Ok(_) => {}
@@ -133,7 +145,7 @@ impl TursoConsumer {
 
 /// Consumer for AI processing and response generation
 pub struct AIConsumer {
-    client: Arc<IggyClient>,
+    client: IggyClient,
     stream_id: u32,
     topic_id: u32,
     consumer_group_id: u32,  // Shared group ID
@@ -145,7 +157,7 @@ pub struct AIConsumer {
 
 impl AIConsumer {
     pub fn new(
-        client: Arc<IggyClient>,
+        client: IggyClient,
         stream_id: u32,
         topic_id: u32,
         store: Arc<ConversationStore>,
@@ -166,7 +178,19 @@ impl AIConsumer {
 
     pub async fn start(self: Arc<Self>) -> Result<()> {
         info!("→ AI consumer ready (group=101)");
-        
+
+        // Explicitly connect and log in this consumer
+        let iggy_address = std::env::var("IGGY_SERVER_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8090".to_string());
+        self.client.connect().await?;
+        let username = std::env::var("IGGY_USERNAME")
+            .or_else(|_| std::env::var("IGGY_ROOT_USERNAME"))
+            .unwrap_or_else(|_| "root".to_string());
+        let password = std::env::var("IGGY_PASSWORD")
+            .or_else(|_| std::env::var("IGGY_ROOT_PASSWORD"))
+            .unwrap_or_else(|_| "".to_string());
+        tracing::info!("Consumer authenticating with username='{}' password='{}'", username, password);
+        self.client.login_user(&username, &password).await?;
+
         loop {
             match self.poll_and_process().await {
                 Ok(_) => {}
