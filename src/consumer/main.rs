@@ -1,4 +1,5 @@
 
+use dotenvy::dotenv;
 use std::error::Error;
 use std::sync::Arc;
 use tracing::info;
@@ -11,17 +12,18 @@ mod consumers;
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
 
-    // Load environment variables from .env
-    dotenv::dotenv().ok();
+    // Load the .env file. Use .ok() to ignore an error if the file is not found,
+    // which is common in production where environment variables are set natively.
+    dotenv().ok();
 
-    let broker_addr = std::env::var("BROKER_ADDR").expect("BROKER_ADDR not set");
-    let turso_url = std::env::var("TURSO_URL").expect("TURSO_URL not set");
-    let turso_token = std::env::var("TURSO_TOKEN").expect("TURSO_TOKEN not set");
-    let ai_model = std::env::var("AI_MODEL").expect("AI_MODEL not set");
-    let ai_api_key = std::env::var("AI_API_KEY").expect("AI_API_KEY not set");
+    let broker_addr = std::env::var("IGGY_SERVER_ADDRESS").expect("IGGY_SERVER_ADDRESS not set");
+    let turso_url = std::env::var("TURSO_DATABASE_URL").expect("TURSO_DATABASE_URL not set");
+    let turso_token = std::env::var("TURSO_AUTH_TOKEN").expect("TURSO_AUTH_TOKEN not set");
+    let ai_model = std::env::var("GROQ_MODEL").expect("GROQ_MODEL not set");
+    let ai_api_key = std::env::var("GROQ_API_KEY").expect("GROQ_API_KEY not set");
     let signalwire_project = std::env::var("SIGNALWIRE_PROJECT_ID").expect("SIGNALWIRE_PROJECT_ID not set");
     let signalwire_token = std::env::var("SIGNALWIRE_AUTH_TOKEN").expect("SIGNALWIRE_AUTH_TOKEN not set");
-    let signalwire_space = std::env::var("SIGNALWIRE_SPACE").expect("SIGNALWIRE_SPACE not set");
+    let signalwire_space = std::env::var("SIGNALWIRE_SPACE_URL").expect("SIGNALWIRE_SPACE_URL not set");
     let signalwire_from = std::env::var("SIGNALWIRE_FROM_NUMBER").expect("SIGNALWIRE_FROM_NUMBER not set");
 
     let broker = MessageBroker::new(&broker_addr).await?;

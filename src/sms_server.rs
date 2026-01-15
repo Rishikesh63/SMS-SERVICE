@@ -98,7 +98,7 @@ impl MessageBatcher {
         }; // Lock released here
         
         // Perform I/O outside of lock
-        info!("⏰ Flushing batch (timeout): {} messages", batch.len());
+        info!("Flushing batch (timeout): {} messages", batch.len());
         self.broker.publish_sms_batch(batch).await?;
         
         Ok(())

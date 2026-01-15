@@ -39,3 +39,4 @@ iggy = "0.6"
 bytes = "1.5"
 clap = { version = "4.5", features = ["derive"] }
 num_cpus = "1.16"
+dotenv = "0.15.0"

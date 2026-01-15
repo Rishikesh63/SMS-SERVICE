@@ -97,7 +97,7 @@ docker run --rm `
 	--cap-add=SYS_NICE `
 	--security-opt seccomp=unconfined `
 	--ulimit memlock=-1:-1 `
-	-e IGGY_USERNAME=root `
+	-e IGGY_USERNAME=iggy `
 	-e IGGY_PASSWORD=iggy `
 	-e IGGY_HTTP_ENABLED=true `
 	-e IGGY_HTTP_ADDRESS=0.0.0.0:8080 `
@@ -117,7 +117,7 @@ docker run --rm \
 	--cap-add=SYS_NICE \
 	--security-opt seccomp=unconfined \
 	--ulimit memlock=-1:-1 \
-	-e IGGY_ROOT_USERNAME=root \
+	-e IGGY_ROOT_USERNAME=iggy \
 	-e IGGY_ROOT_PASSWORD=iggy \
 	-e IGGY_HTTP_ENABLED=true \
 	-e IGGY_HTTP_ADDRESS=0.0.0.0:8080 \

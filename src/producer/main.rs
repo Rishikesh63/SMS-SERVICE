@@ -1,3 +1,4 @@
+use dotenvy::dotenv;
 use std::error::Error;
 
 use std::time::Duration;
@@ -8,6 +9,9 @@ use conversation_store::message_broker::{MessageBroker, SMSMessage};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
+    // Load the .env file. Use .ok() to ignore an error if the file is not found,
+    // which is common in production where environment variables are set natively.
+    dotenv().ok();
     // Example: Use localhost, or make configurable
     let broker = MessageBroker::new("127.0.0.1:8090").await?;
     produce_sms_loop(&broker).await?;
