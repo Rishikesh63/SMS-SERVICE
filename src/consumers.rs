@@ -13,6 +13,13 @@ use crate::signalwire::SignalWireClient;
 
 
 /// =============================
+/// CONSTANTS (SMS SERVICE)
+/// =============================
+const STREAM_NAME: &str = "sms_stream";
+const TOPIC_NAME: &str = "sms_incoming";
+
+
+/// =============================
 /// Turso Consumer
 /// =============================
 pub struct TursoConsumer {
@@ -26,27 +33,35 @@ impl TursoConsumer {
         store: Arc<ConversationStore>,
     ) -> Result<Self> {
         let mut consumer = client
-            .consumer_group("sms-service", "sms_stream", "sms_incoming")?
-            .create_consumer_group_if_not_exists()
-            .auto_join_consumer_group()
-            .auto_commit(AutoCommit::IntervalOrWhen(
-                IggyDuration::new_from_secs(1),
+            .consumer_group(
+                "sms-turso-consumer-group",
+                STREAM_NAME,
+                TOPIC_NAME,
+            )?
+            .auto_commit(AutoCommit::When(
                 AutoCommitWhen::ConsumingAllMessages,
             ))
-            .poll_interval(IggyDuration::new(Duration::from_millis(50)))
+            .create_consumer_group_if_not_exists()
+            .auto_join_consumer_group()
+            .polling_strategy(PollingStrategy::next())
+            .poll_interval(IggyDuration::new(
+                Duration::from_millis(50),
+            ))
             .build();
 
         consumer.init().await?;
-        info!("✓ Turso consumer initialized");
+        info!("✓ SMS Turso consumer initialized");
 
         Ok(Self { consumer, store })
     }
 
     pub async fn start(mut self) -> Result<()> {
-        info!("→ Turso consumer started");
+        info!("→ SMS Turso consumer started");
 
         while let Some(msg) = self.consumer.next().await {
-            let sms: SMSMessage = serde_json::from_slice(&msg.unwrap().message.payload)?;
+            let msg = msg?;
+            let sms: SMSMessage =
+                serde_json::from_slice(&msg.message.payload)?;
 
             self.store
                 .store_message(
@@ -80,18 +95,24 @@ impl AIConsumer {
         signalwire: Arc<SignalWireClient>,
     ) -> Result<Self> {
         let mut consumer = client
-            .consumer_group("sms-ai", "sms_stream", "sms_incoming")?
-            .create_consumer_group_if_not_exists()
-            .auto_join_consumer_group()
-            .auto_commit(AutoCommit::IntervalOrWhen(
-                IggyDuration::new_from_secs(1),
+            .consumer_group(
+                "sms-ai-consumer-group",
+                STREAM_NAME,
+                TOPIC_NAME,
+            )?
+            .auto_commit(AutoCommit::When(
                 AutoCommitWhen::ConsumingAllMessages,
             ))
-            .poll_interval(IggyDuration::new(Duration::from_millis(50)))
+            .create_consumer_group_if_not_exists()
+            .auto_join_consumer_group()
+            .polling_strategy(PollingStrategy::next())
+            .poll_interval(IggyDuration::new(
+                Duration::from_millis(50),
+            ))
             .build();
 
         consumer.init().await?;
-        info!("✓ AI consumer initialized");
+        info!("✓ SMS AI consumer initialized");
 
         Ok(Self {
             consumer,
@@ -102,10 +123,12 @@ impl AIConsumer {
     }
 
     pub async fn start(mut self) -> Result<()> {
-        info!("→ AI consumer started");
+        info!("→ SMS AI consumer started");
 
         while let Some(msg) = self.consumer.next().await {
-            let sms: SMSMessage = serde_json::from_slice(&msg.unwrap().message.payload)?;
+            let msg = msg?;
+            let sms: SMSMessage =
+                serde_json::from_slice(&msg.message.payload)?;
 
             let history: Vec<AIMessage> = self
                 .store
@@ -134,7 +157,9 @@ impl AIConsumer {
                 )
                 .await?;
 
-            self.signalwire.send_sms(&sms.from, &reply).await?;
+            self.signalwire
+                .send_sms(&sms.from, &reply)
+                .await?;
         }
 
         Ok(())
