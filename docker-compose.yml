@@ -1,0 +1,75 @@
+services:
+  iggy-server:
+    image: apache/iggy:edge
+    container_name: iggy-server
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/iggy", "--tcp-server-address", "127.0.0.1:8090", "ping"]
+      interval: 20s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
+
+    cap_add:
+      - SYS_NICE
+    security_opt:
+      - seccomp:unconfined
+
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+    environment:
+      IGGY_ROOT_USERNAME: iggy
+      IGGY_ROOT_PASSWORD: iggy
+      IGGY_TCP_ENABLED: "true"
+      IGGY_TCP_ADDRESS: 0.0.0.0:8090
+      IGGY_HTTP_ENABLED: "true"
+      IGGY_HTTP_ADDRESS: 0.0.0.0:80
+      IGGY_QUIC_ENABLED: "false"
+      IGGY_WEBSOCKET_ENABLED: "false"
+      IGGY_HEARTBEAT_ENABLED: "true"
+      IGGY_HEARTBEAT_INTERVAL: 5s
+
+    ports:
+      - "8090:8090"
+      - "3010:80"
+
+    volumes:
+      - iggy:/iggy/local_data
+
+    networks:
+      - iggy-network
+
+  sms-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.sms-server
+    container_name: sms-server
+    restart: unless-stopped
+   
+    depends_on:
+      iggy-server:
+        condition: service_healthy
+
+    env_file:
+      - .env
+
+    environment:
+      IGGY_SERVER_ADDRESS: iggy-server:8090
+      PORT: 3000
+
+    ports:
+      - "5200:3000"
+
+    networks:
+      - iggy-network
+
+networks:
+  iggy-network:
+    driver: bridge
+
+volumes:
+  iggy:

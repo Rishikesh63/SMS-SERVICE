@@ -1,0 +1,46 @@
+# Git
+.git
+.gitignore
+
+# Rust build artifacts
+target
+**/target
+
+# Node / frontend junk (if any)
+node_modules
+**/node_modules
+
+# Env files
+.env
+.env.*
+
+# Editor / OS files
+.vscode
+.idea
+.DS_Store
+
+# Logs
+logs
+*.log
+
+# Docker artifacts
+Dockerfile*
+docker-compose*.yml
+
+# Bench / data folders (very important)
+iggy-data
+local_data
+data
+tmp
+cache
+
+# Tests & docs (optional)
+tests
+docs
+README.md
+
+# Large media / assets
+*.mp4
+*.zip
+*.tar
+*.gz

@@ -1,10 +1,11 @@
-
 pub mod models;
 pub mod store;
 pub mod ai_service;
 pub mod signalwire;
 pub mod zero_copy;
 pub mod message_broker;
+pub mod consumers;
+
 
 pub use models::{Conversation, Message, MessageRole};
 pub use store::ConversationStore;

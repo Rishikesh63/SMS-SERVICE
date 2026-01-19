@@ -34,7 +34,8 @@ impl ConversationStore {
         Self {
             client: Client::new(),
             database_url: database_url.replace("libsql://", "https://"),
-            auth_token,
+            // Trim whitespace and carriage returns from the auth token
+            auth_token: auth_token.trim().to_string(),
         }
     }
 
@@ -54,7 +55,7 @@ impl ConversationStore {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+            let text: String = response.text().await.unwrap_or_default();
             anyhow::bail!("Turso request failed with status {}: {}", status, text);
         }
 
@@ -212,8 +213,10 @@ impl ConversationStore {
                     let content = row[3].as_str().unwrap_or("").to_string();
                     let created_at_str = row[4].as_str().unwrap_or("").to_string();
 
+                    // MessageRole::from_str returns Option<MessageRole>
                     let role = MessageRole::from_str(&role_str)
                         .context(format!("Invalid role: {}", role_str))?;
+                    
                     let created_at = DateTime::parse_from_rfc3339(&created_at_str)
                         .context("Failed to parse timestamp")?
                         .with_timezone(&Utc);
@@ -305,8 +308,14 @@ impl ConversationStore {
 
     /// Delete a conversation and all its messages
     pub async fn delete_conversation(&self, conversation_id: &str) -> Result<()> {
-        let sql = format!("DELETE FROM conversations WHERE id = '{}'", conversation_id);
-        self.execute_sql(&sql).await?;
+        // First delete messages to maintain referential integrity
+        let delete_messages_sql = format!("DELETE FROM messages WHERE conversation_id = '{}'", conversation_id);
+        self.execute_sql(&delete_messages_sql).await?;
+        
+        // Then delete the conversation
+        let delete_conversation_sql = format!("DELETE FROM conversations WHERE id = '{}'", conversation_id);
+        self.execute_sql(&delete_conversation_sql).await?;
+        
         Ok(())
     }
 

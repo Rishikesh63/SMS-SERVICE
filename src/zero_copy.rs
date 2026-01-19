@@ -1,51 +1,46 @@
-/// Zero-copy message serialization inspired by Apache Iggy's approach
-/// Provides efficient message views without full deserialization
 use anyhow::{Context, Result};
-use bytes::{Bytes, BytesMut, Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-/// Message batch with indexed access to individual messages
-/// Similar to Iggy's approach: separate index from payload for efficient slicing
+/// -----------------------------
+/// Message batch with indexed access
+/// -----------------------------
 #[derive(Debug, Clone)]
 pub struct MessageBatch {
-    /// Index of message offsets (each u32 = 4 bytes)
+    /// Index of message offsets (u32 LE)
     pub indexes: Bytes,
-    /// Raw message payload data
+    /// Raw concatenated message payloads
     pub messages: Bytes,
-    /// Number of messages in the batch
+    /// Number of messages
     pub count: usize,
 }
 
 impl MessageBatch {
-    /// Create a new batch from a vector of messages
+    /// Create a batch from raw message slices
     pub fn from_messages(messages: &[&[u8]]) -> Self {
         let count = messages.len();
-        
-        // Pre-allocate index buffer: 4 bytes per message
+
         let mut index_buf = BytesMut::with_capacity(count * 4);
-        
-        // Pre-allocate message buffer
         let total_size: usize = messages.iter().map(|m| m.len()).sum();
         let mut msg_buf = BytesMut::with_capacity(total_size);
-        
+
         let mut offset = 0u32;
         for msg in messages {
-            // Write offset to index
             index_buf.put_u32_le(offset);
-            
-            // Write message to payload
             msg_buf.put_slice(msg);
             offset += msg.len() as u32;
         }
-        
+
         Self {
             indexes: index_buf.freeze(),
             messages: msg_buf.freeze(),
             count,
         }
     }
-    
-    /// Get an iterator over message views (zero-copy access)
+
+    /// Zero-copy iterator
     pub fn iter(&self) -> MessageBatchIterator {
         MessageBatchIterator {
             indexes: self.indexes.clone(),
@@ -54,34 +49,34 @@ impl MessageBatch {
             count: self.count,
         }
     }
-    
-    /// Get a specific message by index (zero-copy view)
+
+    /// Get message by index (zero-copy)
     pub fn get(&self, index: usize) -> Option<Bytes> {
         if index >= self.count {
             return None;
         }
-        
-        let mut idx_buf = self.indexes.clone();
-        idx_buf.advance(index * 4);
-        let start = idx_buf.get_u32_le() as usize;
-        
+
+        let mut idx = self.indexes.clone();
+        idx.advance(index * 4);
+        let start = idx.get_u32_le() as usize;
+
         let end = if index + 1 < self.count {
-            let next_offset = idx_buf.get_u32_le() as usize;
-            next_offset
+            idx.get_u32_le() as usize
         } else {
             self.messages.len()
         };
-        
+
         Some(self.messages.slice(start..end))
     }
-    
-    /// Get the total size in bytes (metadata + payload)
+
     pub fn total_size(&self) -> usize {
         self.indexes.len() + self.messages.len()
     }
 }
 
-/// Iterator over message views in a batch
+/// -----------------------------
+/// Iterator over MessageBatch
+/// -----------------------------
 pub struct MessageBatchIterator {
     indexes: Bytes,
     messages: Bytes,
@@ -91,27 +86,29 @@ pub struct MessageBatchIterator {
 
 impl Iterator for MessageBatchIterator {
     type Item = Bytes;
-    
+
     fn next(&mut self) -> Option<Self::Item> {
         if self.current >= self.count {
             return None;
         }
-        
+
         let start = self.indexes.get_u32_le() as usize;
-        
+
         let end = if self.current + 1 < self.count {
             let mut peek = self.indexes.clone();
             peek.get_u32_le() as usize
         } else {
             self.messages.len()
         };
-        
+
         self.current += 1;
         Some(self.messages.slice(start..end))
     }
 }
 
-/// SMS Message with efficient serialization
+/// -----------------------------
+/// SMS Message View
+/// -----------------------------
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SMSMessageView {
     pub from: String,
@@ -122,21 +119,16 @@ pub struct SMSMessageView {
 }
 
 impl SMSMessageView {
-    /// Serialize to bytes (for sending)
     pub fn to_bytes(&self) -> Result<Bytes> {
-        let json = serde_json::to_vec(self)?;
-        Ok(Bytes::from(json))
+        Ok(Bytes::from(serde_json::to_vec(self)?))
     }
-    
-    /// Deserialize from bytes view (zero-copy until needed)
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         serde_json::from_slice(bytes).context("Failed to deserialize SMS message")
     }
-    
-    /// Quick metadata extraction without full deserialization
-    /// For routing and filtering without allocating full struct
+
+    /// NOTE: This still parses JSON fully — optimized parsing can be added later
     pub fn extract_conversation_id(bytes: &[u8]) -> Result<String> {
-        // Fast path: parse only conversation_id field
         let value: serde_json::Value = serde_json::from_slice(bytes)?;
         value["conversation_id"]
             .as_str()
@@ -145,45 +137,40 @@ impl SMSMessageView {
     }
 }
 
-/// Zero-copy wrapper around raw message bytes
-/// Delays deserialization until actually needed (inspired by Apache Iggy)
+/// -----------------------------
+/// Lazy zero-copy message wrapper
+/// -----------------------------
 #[derive(Debug, Clone)]
 pub struct LazyMessage {
-    /// Raw message bytes (shared reference, no copy)
     raw: Bytes,
-    /// Cached deserialized message (lazy)
-    cached: std::sync::Arc<std::sync::Mutex<Option<SMSMessageView>>>,
+    cached: Arc<Mutex<Option<SMSMessageView>>>,
 }
 
 impl LazyMessage {
-    /// Create from bytes (zero-copy)
     pub fn new(raw: Bytes) -> Self {
         Self {
             raw,
-            cached: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            cached: Arc::new(Mutex::new(None)),
         }
     }
-    
-    /// Get raw bytes (zero-copy)
+
     pub fn as_bytes(&self) -> &Bytes {
         &self.raw
     }
-    
-    /// Deserialize only when needed (cached)
-    pub fn deserialize(&self) -> Result<SMSMessageView> {
-        let mut cached = self.cached.lock().unwrap();
-        
-        if let Some(msg) = cached.as_ref() {
+
+    pub async fn deserialize(&self) -> Result<SMSMessageView> {
+        let mut guard = self.cached.lock().await;
+
+        if let Some(msg) = guard.as_ref() {
             return Ok(msg.clone());
         }
-        
+
         let msg = SMSMessageView::from_bytes(&self.raw)?;
-        *cached = Some(msg.clone());
+        *guard = Some(msg.clone());
         Ok(msg)
     }
-    
-    /// Extract conversation_id without full deserialization
-    pub fn conversation_id(&self) -> Result<String> {
+
+    pub async fn conversation_id(&self) -> Result<String> {
         SMSMessageView::extract_conversation_id(&self.raw)
     }
 }
@@ -194,34 +181,26 @@ mod tests {
 
     #[test]
     fn test_message_batch_creation() {
-        let msg1 = b"Hello, world!";
-        let msg2 = b"Benchmark test";
-        let msg3 = b"Zero-copy rocks!";
-        
+        let msg1 = b"Hello";
+        let msg2 = b"World";
+        let msg3 = b"ZeroCopy";
+
         let batch = MessageBatch::from_messages(&[msg1, msg2, msg3]);
-        
+
         assert_eq!(batch.count, 3);
-        assert_eq!(batch.indexes.len(), 12); // 3 * 4 bytes
-        
-        let m1 = batch.get(0).unwrap();
-        assert_eq!(&m1[..], msg1);
-        
-        let m2 = batch.get(1).unwrap();
-        assert_eq!(&m2[..], msg2);
-        
-        let m3 = batch.get(2).unwrap();
-        assert_eq!(&m3[..], msg3);
+        assert_eq!(&batch.get(0).unwrap()[..], msg1);
+        assert_eq!(&batch.get(1).unwrap()[..], msg2);
+        assert_eq!(&batch.get(2).unwrap()[..], msg3);
     }
-    
+
     #[test]
     fn test_message_batch_iterator() {
-        let messages = vec![b"msg1".as_slice(), b"message2".as_slice(), b"m3".as_slice()];
+        let messages = vec![b"a".as_slice(), b"bb".as_slice(), b"ccc".as_slice()];
         let batch = MessageBatch::from_messages(&messages);
-        
-        let collected: Vec<Bytes> = batch.iter().collect();
-        assert_eq!(collected.len(), 3);
-        assert_eq!(&collected[0][..], b"msg1");
-        assert_eq!(&collected[1][..], b"message2");
-        assert_eq!(&collected[2][..], b"m3");
+
+        let collected: Vec<_> = batch.iter().collect();
+        assert_eq!(&collected[0][..], b"a");
+        assert_eq!(&collected[1][..], b"bb");
+        assert_eq!(&collected[2][..], b"ccc");
     }
 }

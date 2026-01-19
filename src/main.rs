@@ -7,7 +7,7 @@ async fn main() -> Result<()> {
     // Load environment variables from .env file
     dotenvy::dotenv().ok();
     
-    println!("🚀 Conversation Store Example\n");
+    println!("Conversation Store Example\n");
 
     // Load environment variables from .env file
     let database_url = env::var("TURSO_DATABASE_URL")
@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
         )
         .await?;
 
-    println!("\n📊 Retrieving conversation history...\n");
+    println!("\nRetrieving conversation history...\n");
 
     // Retrieve all messages
     let messages = store.get_conversation_messages(&conversation.id).await?;
@@ -80,17 +80,17 @@ async fn main() -> Result<()> {
 
     // Get message count
     let count = store.get_message_count(&conversation.id).await?;
-    println!("📈 Total messages: {}\n", count);
+    println!("Total messages: {}\n", count);
 
     // List all conversations
-    println!("📋 All conversations:");
+    println!("All conversations:");
     let conversations = store.list_conversations().await?;
     for conv in conversations {
         println!("  - {} (ID: {})", conv.title.unwrap_or_else(|| "Untitled".to_string()), conv.id);
         println!("    Updated: {}", conv.updated_at.format("%Y-%m-%d %H:%M:%S"));
     }
 
-    println!("\n✅ Example completed successfully!");
+    println!("\nExample completed successfully!");
 
     Ok(())
 }

@@ -19,6 +19,25 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
+# Load .env file
+echo "Loading environment variables from .env file..."
+set -a  # Automatically export all variables
+source .env
+set +a  # Stop automatically exporting
+
+# Verify Iggy variables are set
+echo "Checking Iggy configuration..."
+if [ -z "$IGGY_USERNAME" ] || [ -z "$IGGY_PASSWORD" ]; then
+    echo "Warning: IGGY_USERNAME or IGGY_PASSWORD not set in .env"
+    echo "Using defaults (username: iggy, password: iggy)"
+    export IGGY_USERNAME=${IGGY_USERNAME:-iggy}
+    export IGGY_PASSWORD=${IGGY_PASSWORD:-iggy}
+fi
+
+echo "Iggy Server: $IGGY_SERVER_ADDRESS"
+echo "Iggy Username: $IGGY_USERNAME"
+echo ""
+
 # Check if Rust is installed
 if ! command -v cargo &> /dev/null; then
     echo "Error: Rust is not installed"
