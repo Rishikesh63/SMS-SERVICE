@@ -3,8 +3,10 @@ use axum::{routing::get, Router};
 use std::{env, sync::Arc};
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
+
 use iggy::clients::client::IggyClient;
 use iggy::prelude::*;
+
 use conversation_store::connect_turso;
 use conversation_store::ai_service::AIService;
 use conversation_store::signalwire::SignalWireClient;
@@ -18,17 +20,19 @@ async fn health() -> &'static str {
 }
 
 /// -----------------------------
-/// Helper: create Iggy client
+/// Helper: create & connect Iggy client (ASYNC)
 /// -----------------------------
-fn iggy_client() -> Result<Arc<IggyClient>> {
+async fn iggy_client() -> Result<Arc<IggyClient>> {
     let addr = env::var("IGGY_SERVER_ADDRESS")
         .unwrap_or_else(|_| "iggy-server:8090".to_string());
 
     let conn_str = format!("iggy://iggy:iggy@{}", addr);
     info!("Connecting to Iggy: {}", conn_str);
 
-    let client = IggyClient::from_connection_string(&conn_str)
-        .map_err(|e| anyhow::anyhow!("Failed to create Iggy client: {:?}", e))?;
+    let client = IggyClient::from_connection_string(&conn_str)?;
+    client.connect().await?;
+
+    info!("✓ Iggy client connected");
 
     Ok(Arc::new(client))
 }
@@ -43,7 +47,6 @@ async fn main() -> Result<()> {
         .init();
 
     dotenvy::dotenv().ok();
-
     info!("Starting SMS Server");
 
     // --------------------------------------------------
@@ -66,6 +69,7 @@ async fn main() -> Result<()> {
     // AI + SIGNALWIRE
     // --------------------------------------------------
     let ai = Arc::new(AIService::new(model, groq_key));
+
     let signalwire = Arc::new(SignalWireClient::new(
         env::var("SIGNALWIRE_PROJECT_ID")?,
         env::var("SIGNALWIRE_AUTH_TOKEN")?,
@@ -74,16 +78,14 @@ async fn main() -> Result<()> {
     ));
 
     // --------------------------------------------------
-    // IGGY CLIENTS
+    // IGGY CLIENT (SINGLE, SHARED)
     // --------------------------------------------------
-    let producer_client = iggy_client()?;
-    let turso_client = iggy_client()?;
-    let ai_client = iggy_client()?;
+    let iggy = iggy_client().await?;
 
     // ==================================================
     // PRODUCER (SMS INGEST)
     // ==================================================
-    let producer = producer_client
+    let mut producer = iggy
         .producer("sms_stream", "sms_incoming")?
         .direct(
             DirectConfig::builder()
@@ -100,15 +102,15 @@ async fn main() -> Result<()> {
             MaxTopicSize::ServerDefault,
         )
         .build();
-        
 
+    producer.init().await?;
     info!("✓ SMS producer ready");
 
     // ==================================================
-    // TURSO CONSUMER (persist messages)
+    // TURSO CONSUMER
     // ==================================================
     let turso_consumer = TursoConsumer::new(
-        turso_client.clone(),
+        iggy.clone(),
         store.clone(),
     )
     .await?;
@@ -120,10 +122,10 @@ async fn main() -> Result<()> {
     });
 
     // ==================================================
-    // AI CONSUMER (generate reply + send SMS)
+    // AI CONSUMER
     // ==================================================
     let ai_consumer = AIConsumer::new(
-        ai_client.clone(),
+        iggy.clone(),
         store.clone(),
         ai.clone(),
         signalwire.clone(),

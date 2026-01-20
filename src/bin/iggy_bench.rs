@@ -105,6 +105,7 @@ async fn run_pinned_producer(
     let client = IggyClient::from_connection_string(
         "iggy://iggy:iggy@localhost:8090"
     )?;
+    client.connect().await?;
 
     let mut producer = client
         .producer("bench_stream", "bench_topic")?
