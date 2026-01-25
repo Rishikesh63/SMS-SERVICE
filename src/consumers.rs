@@ -4,23 +4,21 @@ use iggy::clients::client::IggyClient;
 use iggy::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::{ConversationStore, MessageRole};
 use crate::ai_service::{AIMessage, AIService};
 use crate::message_broker::SMSMessage;
 use crate::signalwire::SignalWireClient;
 
-
 /// =============================
-/// CONSTANTS (SMS SERVICE)
+/// CONSTANTS
 /// =============================
 const STREAM_NAME: &str = "sms_stream";
 const TOPIC_NAME: &str = "sms_incoming";
 
-
 /// =============================
-/// Turso Consumer
+/// Turso Consumer (stores USER msgs)
 /// =============================
 pub struct TursoConsumer {
     consumer: IggyConsumer,
@@ -38,15 +36,11 @@ impl TursoConsumer {
                 STREAM_NAME,
                 TOPIC_NAME,
             )?
-            .auto_commit(AutoCommit::When(
-                AutoCommitWhen::ConsumingAllMessages,
-            ))
+            .auto_commit(AutoCommit::Disabled) //manual commit
             .create_consumer_group_if_not_exists()
             .auto_join_consumer_group()
             .polling_strategy(PollingStrategy::next())
-            .poll_interval(IggyDuration::new(
-                Duration::from_millis(50),
-            ))
+            .poll_interval(IggyDuration::new(Duration::from_millis(50)))
             .build();
 
         consumer.init().await?;
@@ -58,10 +52,26 @@ impl TursoConsumer {
     pub async fn start(mut self) -> Result<()> {
         info!("→ SMS Turso consumer started");
 
-        while let Some(msg) = self.consumer.next().await {
-            let msg = msg?;
+        while let Some(result) = self.consumer.next().await {
+            let msg = match result {
+                Ok(m) => m,
+                Err(e) => {
+                    error!("Turso polling error: {e}");
+                    continue;
+                }
+            };
+
+            let offset = msg.message.header.offset;
+
             let sms: SMSMessage =
                 serde_json::from_slice(&msg.message.payload)?;
+
+            info!(
+                "📥 User SMS | conv={} | from={} | body={}",
+                sms.conversation_id,
+                sms.from,
+                sms.body
+            );
 
             self.store
                 .store_message(
@@ -70,15 +80,19 @@ impl TursoConsumer {
                     sms.body,
                 )
                 .await?;
+
+            // ACK AFTER DB WRITE
+            // self.consumer
+            //     .store_offset(offset + 1, None)
+            //     .await?;
         }
 
         Ok(())
     }
 }
 
-
 /// =============================
-/// AI Consumer
+/// AI Consumer (reply + send SMS)
 /// =============================
 pub struct AIConsumer {
     consumer: IggyConsumer,
@@ -100,15 +114,11 @@ impl AIConsumer {
                 STREAM_NAME,
                 TOPIC_NAME,
             )?
-            .auto_commit(AutoCommit::When(
-                AutoCommitWhen::ConsumingAllMessages,
-            ))
+            .auto_commit(AutoCommit::Disabled) // 🔒 REQUIRED
             .create_consumer_group_if_not_exists()
             .auto_join_consumer_group()
             .polling_strategy(PollingStrategy::next())
-            .poll_interval(IggyDuration::new(
-                Duration::from_millis(50),
-            ))
+            .poll_interval(IggyDuration::new(Duration::from_millis(50)))
             .build();
 
         consumer.init().await?;
@@ -125,13 +135,31 @@ impl AIConsumer {
     pub async fn start(mut self) -> Result<()> {
         info!("→ SMS AI consumer started");
 
-        while let Some(msg) = self.consumer.next().await {
-            let msg = msg?;
+        while let Some(result) = self.consumer.next().await {
+            let msg = match result {
+                Ok(m) => m,
+                Err(e) => {
+                    error!("AI polling error: {e}");
+                    continue;
+                }
+            };
+
+            let offset = msg.message.header.offset;
+
             let sms: SMSMessage =
                 serde_json::from_slice(&msg.message.payload)?;
 
-            let history: Vec<AIMessage> = self
-                .store
+            // Idempotency guard
+            if self.store.is_message_processed(&sms.id).await? {
+                info!("⏭️ Skipping duplicate {}", sms.id);
+
+                self.consumer
+                    .store_offset(offset + 1, None)
+                    .await?;
+                continue;
+            }
+
+            let history = self.store
                 .get_conversation_messages(&sms.conversation_id)
                 .await?
                 .into_iter()
@@ -142,12 +170,18 @@ impl AIConsumer {
                     role: m.role.as_str().to_string(),
                     content: m.content,
                 })
-                .collect();
+                .collect::<Vec<_>>();
 
-            let reply = self
-                .ai
+            let reply = self.ai
                 .generate_response(&sms.body, &history)
                 .await?;
+
+            info!(
+                "🤖 AI Reply | conv={} | to={} | reply={}",
+                sms.conversation_id,
+                sms.from,
+                reply
+            );
 
             self.store
                 .store_message(
@@ -160,6 +194,17 @@ impl AIConsumer {
             self.signalwire
                 .send_sms(&sms.from, &reply)
                 .await?;
+
+            self.store
+                .mark_message_processed(&sms.id)
+                .await?;
+
+            // FINAL ACK (THIS IS THE COMMIT)
+            self.consumer
+                .store_offset(offset + 1, None)
+                .await?;
+
+            info!("Reply sent & committed for {}", sms.id);
         }
 
         Ok(())

@@ -1,27 +1,19 @@
 ﻿use anyhow::{Context, Result};
-use bytes::Bytes;
+// use bytes::Bytes;
 use iggy::clients::client::IggyClient;
-use iggy::prelude::{
-    BytesSerializable,
-    Client, // ✅ REQUIRED for connect()
-    DirectConfig,
-    IggyDuration,
-    IggyMessage,
-    IggyProducer,
-    Partitioning,
-    IggyExpiry,
-    MaxTopicSize,
-};
+use iggy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
+use std::str::FromStr;
 
-/// -----------------------------
-/// SMS Message Payload
-/// -----------------------------
+use crate::broker_config::BrokerConfig;
+
+/// Domain Message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SMSMessage {
+    pub id: String, 
     pub from: String,
     pub to: String,
     pub body: String,
@@ -29,79 +21,84 @@ pub struct SMSMessage {
     pub conversation_id: String,
 }
 
-/// -----------------------------
-/// Message Broker
-/// -----------------------------
+// Message Broker
 pub struct MessageBroker {
     producer: IggyProducer,
 }
 
 impl MessageBroker {
-    /// Create a new MessageBroker
-    /// NOTE: This function explicitly connects the IggyClient
-    pub async fn new(client: Arc<IggyClient>) -> Result<Self> {
-        // --------------------------------------------------
-        // Ensure Iggy client is connected
-        // --------------------------------------------------
-        client
-            .connect()
-            .await
-            .context("Failed to connect to Iggy server")?;
+    pub async fn connect(
+        client: Arc<IggyClient>,
+        config: BrokerConfig,
+    ) -> Result<Self> {
+        info!("Initializing MessageBroker");
 
-        info!("✓ Iggy client connected");
-
-        // --------------------------------------------------
-        // Create producer
-        // --------------------------------------------------
         let mut producer = client
-            .producer("sms_stream", "sms_incoming")
-            .context("Failed to create SMS producer")?
+            .producer(config.stream, config.topic)
+            .context("Failed to create producer")?
             .direct(
                 DirectConfig::builder()
                     .batch_length(1000)
                     .linger_time(IggyDuration::new(Duration::from_millis(1)))
                     .build(),
             )
-            .create_stream_if_not_exists()
             .partitioning(Partitioning::balanced())
+            .create_stream_if_not_exists()
             .create_topic_if_not_exists(
-                4, // partitions
+                config.partitions,
                 None,
                 IggyExpiry::ServerDefault,
                 MaxTopicSize::ServerDefault,
             )
             .build();
 
-        producer.init().await.context("Failed to init producer")?;
-
-        info!("✓ SMS producer initialized");
+        producer.init().await?;
+        info!("✓ MessageBroker ready");
 
         Ok(Self { producer })
     }
+   
+    // Publish single SMS
+    pub async fn publish_sms(&self, sms: SMSMessage) -> Result<()> {
+    let payload = serde_json::to_string(&sms)
+        .context("Failed to serialize SMS message to JSON string")?;
 
-    /// Publish a single SMS message
-    pub async fn publish_sms(&mut self, sms: SMSMessage) -> Result<()> {
-        let payload = serde_json::to_vec(&sms)
-            .context("Failed to serialize SMS message")?;
+    info!(
+        "Publishing SMS payload size: {} bytes",
+        payload.len()
+    );
 
-        let message = IggyMessage::from_bytes(Bytes::from(payload))?;
-        self.producer.send(vec![message]).await?;
+    // CONSTRUCTOR FOR JSON
+    let msg = IggyMessage::from_str(&payload)
+        .context("Failed to build IggyMessage from string payload")?;
 
-        Ok(())
-    }
+    self.producer.send(vec![msg]).await?;
+    Ok(())
+}
 
-    /// Publish a batch of SMS messages
-    pub async fn publish_sms_batch(&mut self, messages: Vec<SMSMessage>) -> Result<()> {
-        let mut batch = Vec::with_capacity(messages.len());
 
-        for sms in messages {
-            let payload = serde_json::to_vec(&sms)
-                .context("Failed to serialize SMS message")?;
 
-            batch.push(IggyMessage::from_bytes(Bytes::from(payload))?);
-        }
+    
+    // Publish batch SMS
+ pub async fn publish_sms_batch(
+    &self,
+    messages: Vec<SMSMessage>,
+) -> Result<()> {
+    let batch = messages
+        .into_iter()
+        .map(|sms| {
+            let payload = serde_json::to_string(&sms)?;
+            info!("Publishing SMS payload size: {} bytes", payload.len());
 
-        self.producer.send(batch).await?;
-        Ok(())
-    }
+            IggyMessage::from_str(&payload)
+                .context("Failed to build IggyMessage")
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    self.producer.send(batch).await?;
+    Ok(())
+}
+
+
+
 }

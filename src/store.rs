@@ -6,22 +6,54 @@ use serde_json::json;
 
 use crate::models::{Conversation, Message, MessageRole};
 
+/// =============================
+/// Turso HTTP Types
+/// =============================
 #[derive(Debug, Serialize)]
 struct TursoRequest {
-    statements: Vec<String>,
+    requests: Vec<TursoExecute>,
+}
+
+#[derive(Debug, Serialize)]
+struct TursoExecute {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    stmt: TursoStatement,
+}
+
+#[derive(Debug, Serialize)]
+struct TursoStatement {
+    sql: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct TursoResponse {
-    results: Vec<QueryResult>,
+    results: Vec<TursoResult>,
 }
 
 #[derive(Debug, Deserialize)]
-struct QueryResult {
-    columns: Option<Vec<String>>,
-    rows: Option<Vec<Vec<serde_json::Value>>>,
+struct TursoResult {
+    response: Option<TursoInnerResponse>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TursoInnerResponse {
+    result: Option<TursoQueryResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TursoQueryResult {
+    rows: Option<Vec<Vec<TursoValue>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TursoValue {
+    value: serde_json::Value,
+}
+
+/// =============================
+/// Conversation Store
+/// =============================
 pub struct ConversationStore {
     client: Client,
     database_url: String,
@@ -29,71 +61,49 @@ pub struct ConversationStore {
 }
 
 impl ConversationStore {
-    /// Creates a new ConversationStore with HTTP API connection
+    /// Create store (HTTP API)
     pub fn new(database_url: String, auth_token: String) -> Self {
         Self {
             client: Client::new(),
             database_url: database_url.replace("libsql://", "https://"),
-            // Trim whitespace and carriage returns from the auth token
             auth_token: auth_token.trim().to_string(),
         }
     }
 
+    /// -----------------------------
+    /// Low-level SQL executor
+    /// -----------------------------
     async fn execute_sql(&self, sql: &str) -> Result<TursoResponse> {
         let url = format!("{}/v2/pipeline", self.database_url);
-        
+
         let response = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.auth_token))
-            .json(&json!({
-                "requests": [{"type": "execute", "stmt": {"sql": sql}}]
-            }))
+            .json(&TursoRequest {
+                requests: vec![TursoExecute {
+                    kind: "execute",
+                    stmt: TursoStatement {
+                        sql: sql.to_string(),
+                    },
+                }],
+            })
             .send()
             .await
             .context("Failed to send request to Turso")?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let text: String = response.text().await.unwrap_or_default();
-            anyhow::bail!("Turso request failed with status {}: {}", status, text);
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Turso error {}: {}", status, text);
         }
 
-        let json_response: serde_json::Value = response.json().await?;
-        let results = json_response["results"]
-            .as_array()
-            .context("Invalid response format")?;
-
-        Ok(TursoResponse {
-            results: results
-                .iter()
-                .map(|r| QueryResult {
-                    columns: r["response"]["result"]["cols"]
-                        .as_array()
-                        .map(|cols| {
-                            cols.iter()
-                                .filter_map(|c| c["name"].as_str().map(String::from))
-                                .collect()
-                        }),
-                    rows: r["response"]["result"]["rows"]
-                        .as_array()
-                        .map(|rows| {
-                            rows.iter()
-                                .map(|row| {
-                                    row.as_array()
-                                        .unwrap_or(&vec![])
-                                        .iter()
-                                        .map(|v| v["value"].clone())
-                                        .collect()
-                                })
-                                .collect()
-                        }),
-                })
-                .collect(),
-        })
+        Ok(response.json::<TursoResponse>().await?)
     }
 
-    /// Initialize the database schema
+    /// -----------------------------
+    /// Initialize schema
+    /// -----------------------------
     pub async fn initialize(&self) -> Result<()> {
         self.execute_sql(
             "CREATE TABLE IF NOT EXISTS conversations (
@@ -117,53 +127,50 @@ impl ConversationStore {
         .await?;
 
         self.execute_sql(
-            "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id 
-             ON messages(conversation_id)",
+            "CREATE TABLE IF NOT EXISTS processed_messages (
+                message_id TEXT PRIMARY KEY
+            )",
         )
         .await?;
 
         Ok(())
     }
 
-    /// Create a new conversation
-    pub async fn create_conversation(&self, title: Option<String>) -> Result<Conversation> {
-        let conversation = Conversation::new(title);
-
+    /// =============================
+    /// IDEMPOTENCY (CRITICAL)
+    /// =============================
+    pub async fn is_message_processed(&self, message_id: &str) -> Result<bool> {
         let sql = format!(
-            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES ('{}', {}, '{}', '{}')",
-            conversation.id,
-            conversation.title.as_ref().map(|t| format!("'{}'", t.replace("'", "''"))).unwrap_or("NULL".to_string()),
-            conversation.created_at.to_rfc3339(),
-            conversation.updated_at.to_rfc3339()
+            "SELECT 1 FROM processed_messages WHERE message_id = '{}' LIMIT 1",
+            message_id.replace("'", "''")
+        );
+
+        let response = self.execute_sql(&sql).await?;
+
+        Ok(response
+            .results
+            .get(0)
+            .and_then(|r| r.response.as_ref())
+            .and_then(|r| r.result.as_ref())
+            .and_then(|r| r.rows.as_ref())
+            .map(|rows| !rows.is_empty())
+            .unwrap_or(false))
+    }
+
+    pub async fn mark_message_processed(&self, message_id: &str) -> Result<()> {
+        let sql = format!(
+            "INSERT OR IGNORE INTO processed_messages (message_id)
+             VALUES ('{}')",
+            message_id.replace("'", "''")
         );
 
         self.execute_sql(&sql).await?;
-        Ok(conversation)
+        Ok(())
     }
 
-    /// Create a new conversation with a specific ID
-    pub async fn create_conversation_with_id(&self, id: String, title: Option<String>) -> Result<Conversation> {
-        let now = Utc::now();
-        let conversation = Conversation {
-            id,
-            title,
-            created_at: now,
-            updated_at: now,
-        };
-
-        let sql = format!(
-            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES ('{}', {}, '{}', '{}')",
-            conversation.id,
-            conversation.title.as_ref().map(|t| format!("'{}'", t.replace("'", "''"))).unwrap_or("NULL".to_string()),
-            conversation.created_at.to_rfc3339(),
-            conversation.updated_at.to_rfc3339()
-        );
-
-        self.execute_sql(&sql).await?;
-        Ok(conversation)
-    }
-
-    /// Store a new message in the database
+    /// -----------------------------
+    /// Store message
+    /// -----------------------------
     pub async fn store_message(
         &self,
         conversation_id: String,
@@ -173,7 +180,8 @@ impl ConversationStore {
         let message = Message::new(conversation_id.clone(), role, content);
 
         let sql = format!(
-            "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES ('{}', '{}', '{}', '{}', '{}')",
+            "INSERT INTO messages (id, conversation_id, role, content, created_at)
+             VALUES ('{}', '{}', '{}', '{}', '{}')",
             message.id,
             message.conversation_id,
             message.role.as_str(),
@@ -183,161 +191,64 @@ impl ConversationStore {
 
         self.execute_sql(&sql).await?;
 
-        // Update conversation timestamp
         let update_sql = format!(
-            "UPDATE conversations SET updated_at = '{}' WHERE id = '{}'",
+            "UPDATE conversations
+             SET updated_at = '{}'
+             WHERE id = '{}'",
             Utc::now().to_rfc3339(),
             conversation_id
         );
-        self.execute_sql(&update_sql).await?;
 
+        self.execute_sql(&update_sql).await?;
         Ok(message)
     }
 
-    /// Retrieve all messages for a conversation
-    pub async fn get_conversation_messages(&self, conversation_id: &str) -> Result<Vec<Message>> {
+    /// -----------------------------
+    /// Get conversation history
+    /// -----------------------------
+    pub async fn get_conversation_messages(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<Message>> {
         let sql = format!(
-            "SELECT id, conversation_id, role, content, created_at FROM messages WHERE conversation_id = '{}' ORDER BY created_at ASC",
+            "SELECT id, conversation_id, role, content, created_at
+             FROM messages
+             WHERE conversation_id = '{}'
+             ORDER BY created_at ASC",
             conversation_id
         );
 
         let response = self.execute_sql(&sql).await?;
         let mut messages = Vec::new();
 
-        if let Some(result) = response.results.first() {
-            if let Some(rows) = &result.rows {
-                for row in rows {
-                    let id = row[0].as_str().unwrap_or("").to_string();
-                    let conv_id = row[1].as_str().unwrap_or("").to_string();
-                    let role_str = row[2].as_str().unwrap_or("").to_string();
-                    let content = row[3].as_str().unwrap_or("").to_string();
-                    let created_at_str = row[4].as_str().unwrap_or("").to_string();
+        if let Some(result) = response.results.get(0)
+            .and_then(|r| r.response.as_ref())
+            .and_then(|r| r.result.as_ref())
+            .and_then(|r| r.rows.as_ref())
+        {
+            for row in result {
+                let id = row[0].value.as_str().unwrap_or("").to_string();
+                let conv_id = row[1].value.as_str().unwrap_or("").to_string();
+                let role_str = row[2].value.as_str().unwrap_or("");
+                let content = row[3].value.as_str().unwrap_or("").to_string();
+                let created_at_str = row[4].value.as_str().unwrap_or("");
 
-                    // MessageRole::from_str returns Option<MessageRole>
-                    let role = MessageRole::from_str(&role_str)
-                        .context(format!("Invalid role: {}", role_str))?;
-                    
-                    let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                        .context("Failed to parse timestamp")?
-                        .with_timezone(&Utc);
+                let role = MessageRole::from_str(role_str)
+                    .context("Invalid role")?;
 
-                    messages.push(Message {
-                        id,
-                        conversation_id: conv_id,
-                        role,
-                        content,
-                        created_at,
-                    });
-                }
+                let created_at = DateTime::parse_from_rfc3339(created_at_str)?
+                    .with_timezone(&Utc);
+
+                messages.push(Message {
+                    id,
+                    conversation_id: conv_id,
+                    role,
+                    content,
+                    created_at,
+                });
             }
         }
 
         Ok(messages)
-    }
-
-    /// Retrieve a specific conversation by ID
-    pub async fn get_conversation(&self, conversation_id: &str) -> Result<Option<Conversation>> {
-        let sql = format!(
-            "SELECT id, title, created_at, updated_at FROM conversations WHERE id = '{}'",
-            conversation_id
-        );
-
-        let response = self.execute_sql(&sql).await?;
-
-        if let Some(result) = response.results.first() {
-            if let Some(rows) = &result.rows {
-                if let Some(row) = rows.first() {
-                    let id = row[0].as_str().unwrap_or("").to_string();
-                    let title = row[1].as_str().map(String::from);
-                    let created_at_str = row[2].as_str().unwrap_or("");
-                    let updated_at_str = row[3].as_str().unwrap_or("");
-
-                    let created_at = DateTime::parse_from_rfc3339(created_at_str)
-                        .context("Failed to parse created_at")?
-                        .with_timezone(&Utc);
-                    let updated_at = DateTime::parse_from_rfc3339(updated_at_str)
-                        .context("Failed to parse updated_at")?
-                        .with_timezone(&Utc);
-
-                    return Ok(Some(Conversation {
-                        id,
-                        title,
-                        created_at,
-                        updated_at,
-                    }));
-                }
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// List all conversations
-    pub async fn list_conversations(&self) -> Result<Vec<Conversation>> {
-        let sql = "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC";
-        let response = self.execute_sql(sql).await?;
-        let mut conversations = Vec::new();
-
-        if let Some(result) = response.results.first() {
-            if let Some(rows) = &result.rows {
-                for row in rows {
-                    let id = row[0].as_str().unwrap_or("").to_string();
-                    let title = row[1].as_str().map(String::from);
-                    let created_at_str = row[2].as_str().unwrap_or("");
-                    let updated_at_str = row[3].as_str().unwrap_or("");
-
-                    let created_at = DateTime::parse_from_rfc3339(created_at_str)
-                        .context("Failed to parse created_at")?
-                        .with_timezone(&Utc);
-                    let updated_at = DateTime::parse_from_rfc3339(updated_at_str)
-                        .context("Failed to parse updated_at")?
-                        .with_timezone(&Utc);
-
-                    conversations.push(Conversation {
-                        id,
-                        title,
-                        created_at,
-                        updated_at,
-                    });
-                }
-            }
-        }
-
-        Ok(conversations)
-    }
-
-    /// Delete a conversation and all its messages
-    pub async fn delete_conversation(&self, conversation_id: &str) -> Result<()> {
-        // First delete messages to maintain referential integrity
-        let delete_messages_sql = format!("DELETE FROM messages WHERE conversation_id = '{}'", conversation_id);
-        self.execute_sql(&delete_messages_sql).await?;
-        
-        // Then delete the conversation
-        let delete_conversation_sql = format!("DELETE FROM conversations WHERE id = '{}'", conversation_id);
-        self.execute_sql(&delete_conversation_sql).await?;
-        
-        Ok(())
-    }
-
-    /// Get the count of messages in a conversation
-    pub async fn get_message_count(&self, conversation_id: &str) -> Result<i64> {
-        let sql = format!(
-            "SELECT COUNT(*) FROM messages WHERE conversation_id = '{}'",
-            conversation_id
-        );
-
-        let response = self.execute_sql(&sql).await?;
-
-        if let Some(result) = response.results.first() {
-            if let Some(rows) = &result.rows {
-                if let Some(row) = rows.first() {
-                    if let Some(count) = row[0].as_i64() {
-                        return Ok(count);
-                    }
-                }
-            }
-        }
-
-        Ok(0)
     }
 }

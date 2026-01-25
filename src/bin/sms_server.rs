@@ -1,16 +1,20 @@
 use anyhow::Result;
-use axum::{routing::get, Router};
-use std::{env, sync::Arc};
+use axum::{
+    extract::{Form, State},
+    routing::{get, post},
+    Router,
+    http::StatusCode,
+};
+use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
+use chrono::Utc;
+use serde::Deserialize;
 
-use iggy::clients::client::IggyClient;
-use iggy::prelude::*;
-
-use conversation_store::connect_turso;
-use conversation_store::ai_service::AIService;
-use conversation_store::signalwire::SignalWireClient;
-use conversation_store::consumers::{AIConsumer, TursoConsumer};
+use conversation_store::message_broker::{MessageBroker, SMSMessage};
+use conversation_store::infra::iggy::connect_iggy;
+use conversation_store::app_config::AppConfig;
+use conversation_store::broker_config::BrokerConfig;
 
 /// -----------------------------
 /// Health
@@ -18,23 +22,55 @@ use conversation_store::consumers::{AIConsumer, TursoConsumer};
 async fn health() -> &'static str {
     "OK"
 }
+/// -----------------------------
+/// Incoming SMS
+/// -----------------------------
+#[derive(Debug, Deserialize)]
+struct IncomingSMS {
+    #[serde(rename = "From")]
+    from: String,
+    #[serde(rename = "To")]
+    to: String,
+    #[serde(rename = "Body")]
+    body: String,
+}
 
 /// -----------------------------
-/// Helper: create & connect Iggy client (ASYNC)
+/// App State
 /// -----------------------------
-async fn iggy_client() -> Result<Arc<IggyClient>> {
-    let addr = env::var("IGGY_SERVER_ADDRESS")
-        .unwrap_or_else(|_| "iggy-server:8090".to_string());
+#[derive(Clone)]
+struct AppState {
+    broker: Arc<MessageBroker>,
+}
 
-    let conn_str = format!("iggy://iggy:iggy@{}", addr);
-    info!("Connecting to Iggy: {}", conn_str);
+/// -----------------------------
+/// SMS Webhook
+/// -----------------------------
+async fn sms_webhook(
+    State(state): State<AppState>,
+    Form(sms): Form<IncomingSMS>,
+) -> Result<StatusCode, StatusCode> {
+    info!("SMS from {} → {}", sms.from, sms.body);
 
-    let client = IggyClient::from_connection_string(&conn_str)?;
-    client.connect().await?;
+    let msg = SMSMessage {
+         id: uuid::Uuid::new_v4().to_string(),
+        from: sms.from.clone(),
+        to: sms.to,
+        body: sms.body,
+        timestamp: Utc::now().timestamp(),
+        conversation_id: format!("sms_{}", uuid::Uuid::new_v4()),
+    };
 
-    info!("✓ Iggy client connected");
+    state
+        .broker
+        .publish_sms(msg)
+        .await
+        .map_err(|e| {
+            error!("Failed to publish SMS: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
-    Ok(Arc::new(client))
+    Ok(StatusCode::OK)
 }
 
 /// -----------------------------
@@ -42,111 +78,45 @@ async fn iggy_client() -> Result<Arc<IggyClient>> {
 /// -----------------------------
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
-    dotenvy::dotenv().ok();
+    // Load + validate env ONCE
+    let config = Arc::new(AppConfig::load()?);
+
     info!("Starting SMS Server");
 
-    // --------------------------------------------------
-    // ENV
-    // --------------------------------------------------
-    let db_url = env::var("TURSO_DATABASE_URL")?;
-    let db_token = env::var("TURSO_AUTH_TOKEN")?;
-    let groq_key = env::var("GROQ_API_KEY")?;
-    let model = env::var("GROQ_MODEL")
-        .unwrap_or_else(|_| "llama-3.3-70b-versatile".to_string());
+    // -----------------------------
+    // IGGY
+    // -----------------------------
+    let iggy = connect_iggy().await?;
+    info!("✓ Connected to Iggy");
 
-    let port = env::var("PORT").unwrap_or_else(|_| "3001".into());
-
-    // --------------------------------------------------
-    // STORE
-    // --------------------------------------------------
-    let store = Arc::new(connect_turso(&db_url, &db_token).await?);
-
-    // --------------------------------------------------
-    // AI + SIGNALWIRE
-    // --------------------------------------------------
-    let ai = Arc::new(AIService::new(model, groq_key));
-
-    let signalwire = Arc::new(SignalWireClient::new(
-        env::var("SIGNALWIRE_PROJECT_ID")?,
-        env::var("SIGNALWIRE_AUTH_TOKEN")?,
-        env::var("SIGNALWIRE_SPACE_URL")?,
-        env::var("SIGNALWIRE_FROM_NUMBER")?,
-    ));
-
-    // --------------------------------------------------
-    // IGGY CLIENT (SINGLE, SHARED)
-    // --------------------------------------------------
-    let iggy = iggy_client().await?;
-
-    // ==================================================
-    // PRODUCER (SMS INGEST)
-    // ==================================================
-    let mut producer = iggy
-        .producer("sms_stream", "sms_incoming")?
-        .direct(
-            DirectConfig::builder()
-                .batch_length(1000)
-                .linger_time(IggyDuration::new(std::time::Duration::from_millis(1)))
-                .build(),
-        )
-        .create_stream_if_not_exists()
-        .partitioning(Partitioning::balanced())
-        .create_topic_if_not_exists(
-            4,
-            None,
-            IggyExpiry::ServerDefault,
-            MaxTopicSize::ServerDefault,
-        )
-        .build();
-
-    producer.init().await?;
-    info!("✓ SMS producer ready");
-
-    // ==================================================
-    // TURSO CONSUMER
-    // ==================================================
-    let turso_consumer = TursoConsumer::new(
+    let broker = Arc::new(
+    MessageBroker::connect(
         iggy.clone(),
-        store.clone(),
+        BrokerConfig {
+            stream: "sms_stream",
+            topic: "sms_incoming",
+            partitions: 4,
+        },
     )
-    .await?;
+    .await?
+);
 
-    tokio::spawn(async move {
-        if let Err(e) = turso_consumer.start().await {
-            error!("Turso consumer failed: {e}");
-        }
-    });
+    info!("✓ MessageBroker ready");
 
-    // ==================================================
-    // AI CONSUMER
-    // ==================================================
-    let ai_consumer = AIConsumer::new(
-        iggy.clone(),
-        store.clone(),
-        ai.clone(),
-        signalwire.clone(),
-    )
-    .await?;
-
-    tokio::spawn(async move {
-        if let Err(e) = ai_consumer.start().await {
-            error!("AI consumer failed: {e}");
-        }
-    });
-
-    // ==================================================
+    // -----------------------------
     // HTTP SERVER
-    // ==================================================
+    // -----------------------------
     let app = Router::new()
+        .route("/", get(health))
         .route("/health", get(health))
-        .layer(TraceLayer::new_for_http());
+        .route("/sms/webhook", post(sms_webhook))
+        .layer(TraceLayer::new_for_http())
+        .with_state(AppState { broker });
 
-    let addr = format!("0.0.0.0:{port}");
-    info!("📡 Listening on {addr}");
+    let addr = format!("0.0.0.0:{}", config.port);
+    info!("Listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;

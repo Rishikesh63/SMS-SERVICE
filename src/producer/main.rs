@@ -1,11 +1,14 @@
-use dotenvy::dotenv;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
+
 use tokio::time::sleep;
 use tracing::info;
-use iggy::clients::client::IggyClient;
+
+use conversation_store::app_config::AppConfig;
+use conversation_store::infra::iggy::connect_iggy;
 use conversation_store::message_broker::{MessageBroker, SMSMessage};
+use conversation_store::broker_config::BrokerConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -13,36 +16,43 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_env_filter("info")
         .init();
 
-    dotenv().ok();
+    // Load + validate env ONCE (no dotenv here)
+    let _config = AppConfig::load()?;
 
     info!("Starting SMS producer");
 
     // =====================================================
-    // IGGY CLIENT (HIGH-LEVEL SDK)
+    // IGGY CLIENT
     // =====================================================
-    let client = Arc::new(
-        IggyClient::from_connection_string(
-            "iggy://iggy:iggy@127.0.0.1:8090"
-        )?
-    );
-
+    let client = connect_iggy().await?;
     info!("✓ Connected to Iggy");
 
     // =====================================================
     // MESSAGE BROKER (PRODUCER ROLE)
     // =====================================================
-    let mut broker = MessageBroker::new(client.clone()).await?;
+    let broker = Arc::new(
+    MessageBroker::connect(
+        client.clone(),
+        BrokerConfig {
+            stream: "sms_stream",
+            topic: "sms_incoming",
+            partitions: 4,
+        },
+    )
+    .await?
+);
+
 
     // =====================================================
     // PRODUCER LOOP
     // =====================================================
-    produce_sms_loop(&mut broker).await?;
+    produce_sms_loop(broker).await?;
 
     Ok(())
 }
 
 async fn produce_sms_loop(
-    broker: &mut MessageBroker,
+    broker: Arc<MessageBroker>,
 ) -> Result<(), Box<dyn Error>> {
     let interval = Duration::from_millis(500);
     let mut current_id: u64 = 0;
@@ -51,6 +61,7 @@ async fn produce_sms_loop(
         current_id += 1;
 
         let sms = SMSMessage {
+            id: uuid::Uuid::new_v4().to_string(),
             from: "+1234567890".to_string(),
             to: "+1098765432".to_string(),
             body: format!("Hello, this is message #{}", current_id),
